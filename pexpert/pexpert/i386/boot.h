@@ -121,13 +121,17 @@ typedef struct boot_icon_element boot_icon_element;
 #define kBootArgsEfiMode32              32
 #define kBootArgsEfiMode64              64
 
+/* Bitfields for boot_args->flags */
+#define kBootArgsFlagRebootOnPanic	(1 << 0)
+#define kBootArgsFlagHiDPI		(1 << 1)
+
 typedef struct boot_args {
     uint16_t    Revision;	/* Revision of boot_args structure */
     uint16_t    Version;	/* Version of boot_args structure */
 
     uint8_t     efiMode;    /* 32 = 32-bit, 64 = 64-bit */
     uint8_t     debugMode;  /* Bit field with behavior changes */
-    uint8_t     __reserved1[2];
+    uint16_t    flags;
 
     char        CommandLine[BOOT_LINE_LENGTH];	/* Passed in command line */
 
@@ -149,7 +153,7 @@ typedef struct boot_args {
     uint64_t    efiRuntimeServicesVirtualPageStart; /* virtual address of defragmented runtime pages */
 
     uint32_t    efiSystemTable;   /* physical address of system table in runtime area */
-    uint32_t    __reserved2;
+    uint32_t    kslide;
 
     uint32_t    performanceDataStart; /* physical address of log */
     uint32_t    performanceDataSize;

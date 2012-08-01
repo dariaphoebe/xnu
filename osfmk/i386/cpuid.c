@@ -29,21 +29,10 @@
  * @OSF_COPYRIGHT@
  */
 #include <platforms.h>
-#include <mach_kdb.h>
 #include <vm/vm_page.h>
 #include <pexpert/pexpert.h>
 
 #include <i386/cpuid.h>
-#if MACH_KDB
-#include <machine/db_machdep.h>
-#include <ddb/db_aout.h>
-#include <ddb/db_access.h>
-#include <ddb/db_sym.h>
-#include <ddb/db_variables.h>
-#include <ddb/db_command.h>
-#include <ddb/db_output.h>
-#include <ddb/db_expr.h>
-#endif
 
 static	boolean_t	cpuid_dbg
 #if DEBUG
@@ -633,7 +622,7 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 	DBG(" features            : 0x%016llx\n", info_p->cpuid_features);
 	DBG(" extfeatures         : 0x%016llx\n", info_p->cpuid_extfeatures);
 	DBG(" logical_per_package : %d\n", info_p->cpuid_logical_per_package);
-        DBG(" microcode_version   : 0x%08x\n", info_p->cpuid_microcode_version);
+	DBG(" microcode_version   : 0x%08x\n", info_p->cpuid_microcode_version);
 
 	/* Fold in the Invariant TSC feature bit, if present */
 	if (info_p->cpuid_max_ext >= 0x80000007) {
@@ -737,6 +726,17 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
 	}
 
+	if (info_p->cpuid_model == CPUID_MODEL_IVYBRIDGE) {
+		/*
+		 * XSAVE Features:
+		 */
+		cpuid_fn(0x7, reg);
+		info_p->cpuid_leaf7_features = reg[ebx];
+
+		DBG(" Feature Leaf7:\n");
+		DBG("  EBX           : 0x%x\n", reg[ebx]);
+	}
+
 	return;
 }
 
@@ -773,6 +773,9 @@ cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 		case CPUID_MODEL_SANDYBRIDGE:
 		case CPUID_MODEL_JAKETOWN:
 			cpufamily = CPUFAMILY_INTEL_SANDYBRIDGE;
+			break;
+		case CPUID_MODEL_IVYBRIDGE:
+			cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
 			break;
 		}
 		break;
@@ -820,6 +823,7 @@ cpuid_set_info(void)
 		info_p->thread_count = bitfield32((uint32_t)msr, 15,  0);
 		break;
 		}
+	case CPUFAMILY_INTEL_IVYBRIDGE:
 	case CPUFAMILY_INTEL_SANDYBRIDGE:
 	case CPUFAMILY_INTEL_NEHALEM: {
 		uint64_t msr = rdmsr64(MSR_CORE_THREAD_COUNT);
@@ -899,6 +903,8 @@ static struct table {
 	{CPUID_FEATURE_SEGLIM64,  "SEGLIM64"},
 	{CPUID_FEATURE_TSCTMR,    "TSCTMR"},
 	{CPUID_FEATURE_AVX1_0,    "AVX1.0"},
+	{CPUID_FEATURE_RDRAND,    "RDRAND"},
+	{CPUID_FEATURE_F16C,      "F16C"},
 	{0, 0}
 },
 extfeature_map[] = {
@@ -909,6 +915,13 @@ extfeature_map[] = {
 	{CPUID_EXTFEATURE_LAHF,    "LAHF"},
 	{CPUID_EXTFEATURE_RDTSCP,  "RDTSCP"},
 	{CPUID_EXTFEATURE_TSCI,    "TSCI"},
+	{0, 0}
+
+},
+leaf7_feature_map[] = {
+	{CPUID_LEAF7_FEATURE_RDWRFSGS, "RDWRFSGS"},
+	{CPUID_LEAF7_FEATURE_SMEP,     "SMEP"},
+	{CPUID_LEAF7_FEATURE_ENFSTRG,  "ENFSTRG"},
 	{0, 0}
 };
 
@@ -957,6 +970,12 @@ cpuid_get_extfeature_names(uint64_t extfeatures, char *buf, unsigned buf_len)
 	return cpuid_get_names(extfeature_map, extfeatures, buf, buf_len); 
 }
 
+char *
+cpuid_get_leaf7_feature_names(uint64_t features, char *buf, unsigned buf_len)
+{
+	return cpuid_get_names(leaf7_feature_map, features, buf, buf_len); 
+}
+
 void
 cpuid_feature_display(
 	const char	*header)
@@ -965,6 +984,9 @@ cpuid_feature_display(
 
 	kprintf("%s: %s", header,
 		 cpuid_get_feature_names(cpuid_features(), buf, sizeof(buf)));
+	if (cpuid_leaf7_features())
+		kprintf(" %s", cpuid_get_leaf7_feature_names(
+				cpuid_leaf7_features(), buf, sizeof(buf)));
 	kprintf("\n");
 	if (cpuid_features() & CPUID_FEATURE_HTT) {
 #define s_if_plural(n)	((n > 1) ? "s" : "")
@@ -1051,48 +1073,75 @@ cpuid_extfeatures(void)
 	return cpuid_info()->cpuid_extfeatures;
 }
  
- 
-#if MACH_KDB
-
-/*
- *	Display the cpuid
- * *		
- *	cp
- */
-void 
-db_cpuid(__unused db_expr_t addr,
-	 __unused int have_addr,
-	 __unused db_expr_t count,
-	 __unused char *modif)
+uint64_t
+cpuid_leaf7_features(void)
 {
-
-	uint32_t        i, mid;
-	uint32_t        cpid[4];
-
-	do_cpuid(0, cpid);	/* Get the first cpuid which is the number of
-				 * basic ids */
-	db_printf("%08X - %08X %08X %08X %08X\n",
-		0, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-
-	mid = cpid[eax];	/* Set the number */
-	for (i = 1; i <= mid; i++) {	/* Dump 'em out */
-		do_cpuid(i, cpid);	/* Get the next */
-		db_printf("%08X - %08X %08X %08X %08X\n",
-			i, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-	}
-	db_printf("\n");
-
-	do_cpuid(0x80000000, cpid);	/* Get the first extended cpuid which
-					 * is the number of extended ids */
-	db_printf("%08X - %08X %08X %08X %08X\n",
-		0x80000000, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-
-	mid = cpid[eax];	/* Set the number */
-	for (i = 0x80000001; i <= mid; i++) {	/* Dump 'em out */
-		do_cpuid(i, cpid);	/* Get the next */
-		db_printf("%08X - %08X %08X %08X %08X\n",
-			i, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-	}
+	return cpuid_info()->cpuid_leaf7_features;
 }
 
-#endif
+static i386_vmm_info_t	*_cpuid_vmm_infop = NULL;
+static i386_vmm_info_t	_cpuid_vmm_info;
+
+static void
+cpuid_init_vmm_info(i386_vmm_info_t *info_p)
+{
+	uint32_t	reg[4];
+	uint32_t	max_vmm_leaf;
+
+	bzero(info_p, sizeof(*info_p));
+
+	if (!cpuid_vmm_present())
+		return;
+
+	DBG("cpuid_init_vmm_info(%p)\n", info_p);
+
+	/* do cpuid 0x40000000 to get VMM vendor */
+	cpuid_fn(0x40000000, reg);
+	max_vmm_leaf = reg[eax];
+	bcopy((char *)&reg[ebx], &info_p->cpuid_vmm_vendor[0], 4);
+	bcopy((char *)&reg[ecx], &info_p->cpuid_vmm_vendor[4], 4);
+	bcopy((char *)&reg[edx], &info_p->cpuid_vmm_vendor[8], 4);
+	info_p->cpuid_vmm_vendor[12] = '\0';
+
+	if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_VMWARE)) {
+		/* VMware identification string: kb.vmware.com/kb/1009458 */
+		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_VMWARE;
+	} else {
+		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_UNKNOWN;
+	}
+
+	/* VMM generic leaves: https://lkml.org/lkml/2008/10/1/246 */
+	if (max_vmm_leaf >= 0x40000010) {
+		cpuid_fn(0x40000010, reg);
+		
+		info_p->cpuid_vmm_tsc_frequency = reg[eax];
+		info_p->cpuid_vmm_bus_frequency = reg[ebx];
+	}
+
+	DBG(" vmm_vendor          : %s\n", info_p->cpuid_vmm_vendor);
+	DBG(" vmm_family          : %u\n", info_p->cpuid_vmm_family);
+	DBG(" vmm_bus_frequency   : %u\n", info_p->cpuid_vmm_bus_frequency);
+	DBG(" vmm_tsc_frequency   : %u\n", info_p->cpuid_vmm_tsc_frequency);
+}
+
+boolean_t
+cpuid_vmm_present(void)
+{
+	return (cpuid_features() & CPUID_FEATURE_VMM) ? TRUE : FALSE;
+}
+
+i386_vmm_info_t *
+cpuid_vmm_info(void)
+{
+	if (_cpuid_vmm_infop == NULL) {
+		cpuid_init_vmm_info(&_cpuid_vmm_info);
+		_cpuid_vmm_infop = &_cpuid_vmm_info;
+	}
+	return _cpuid_vmm_infop;
+}
+
+uint32_t
+cpuid_vmm_family(void)
+{
+	return cpuid_vmm_info()->cpuid_vmm_family;
+}
